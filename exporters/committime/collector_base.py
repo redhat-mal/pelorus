@@ -69,23 +69,38 @@ class AbstractCommitCollector(pelorus.AbstractPelorusExporter):
             # only use builds that have the app label
             builds = v1_builds.get(namespace=namespace, label_selector=app_label)
 
+            logging.debug("Searching for Tekton Resources with label: %s in namespace: %s" % (app_label, namespace))
+
+            #v1_tekton = self._kube_client.resources.get(api_version='tekton.dev/v1alpha1', kind='PipelineResource')
+            # only use builds that have the app label
+            #tekton_resources = v1_tekton.get(namespace=namespace, label_selector=app_label)
+            #tekton_git_resources = list(filter(lambda b: b.spec.type == 'git', tekton_resources))
+
+            #logging.debug("============ TEKTON: %s" % (tekton_resources))
+
             # use a jsonpath expression to find all values for the app label
             jsonpath_str = "$['items'][*]['metadata']['labels']['" + str(app_label) + "']"
             jsonpath_expr = parse(jsonpath_str)
 
             found = jsonpath_expr.find(builds)
 
+            #found += jsonpath_expr.find(tekton_resources)
+
             apps = [match.value for match in found]
 
             if not apps:
+                logging.debug("No apps found in namespace %s", namespace)
                 continue
             # remove duplicates
             apps = list(dict.fromkeys(apps))
             builds_by_app = {}
+            ###tekton_by_app = {}
 
             for app in apps:
                 builds_by_app[app] = list(filter(lambda b: b.metadata.labels[app_label] == app, builds.items))
+                ###tekton_by_app[app] = list(filter(lambda b: b.metadata.labels[app_label] == app, tekton_resources.items))
 
+            #logging.debug("============ Found TEKTON: %s" % (tekton_by_app))
             metrics += self.get_metrics_from_apps(builds_by_app, namespace)
 
         return metrics
@@ -101,6 +116,8 @@ class AbstractCommitCollector(pelorus.AbstractPelorusExporter):
         for app in apps:
 
             builds = apps[app]
+            logging.debug("============ START APP: %s-%s" % (app,namespace))
+
             jenkins_builds = list(filter(lambda b: b.spec.strategy.type == 'JenkinsPipeline', builds))
             code_builds = list(filter(lambda b: b.spec.strategy.type in ['Source', 'Binary', 'Docker'], builds))
             # assume for now that there will only be one repo/branch per app
@@ -109,14 +126,15 @@ class AbstractCommitCollector(pelorus.AbstractPelorusExporter):
             repo_url = None
             if jenkins_builds:
                 # we will default to the repo listed in '.spec.source.git'
-                repo_url = jenkins_builds[0].spec.source.git.uri
-
-                # however, in cases where the Jenkinsfile and source code are separate, we look for params
-                git_repo_regex = re.compile(r"(\w+://)(.+@)*([\w\d\.]+)(:[\d]+){0,1}/*(.*)")
-                for env in jenkins_builds[0].spec.strategy.jenkinsPipelineStrategy.env:
-                    result = git_repo_regex.match(env.value)
-                    if result:
-                        repo_url = env.value
+                if jenkins_builds[0].spec.source.git:
+                    repo_url = jenkins_builds[0].spec.source.git.uri
+                else:
+                    # however, in cases where the Jenkinsfile and source code are separate, we look for params
+                    git_repo_regex = re.compile(r"(\w+://)(.+@)*([\w\d\.]+)(:[\d]+){0,1}/*(.*)")
+                    for env in jenkins_builds[0].spec.strategy.jenkinsPipelineStrategy.env:
+                        result = git_repo_regex.match(env.value)
+                        if result:
+                            repo_url = env.value
 
             for build in code_builds:
                 try:
@@ -126,17 +144,23 @@ class AbstractCommitCollector(pelorus.AbstractPelorusExporter):
 
                 if metric:
                     metrics.append(metric)
+            logging.debug("============ END APP: %s-%s" % (app,namespace))
         return metrics
 
     def get_metric_from_build(self, build, app, namespace, repo_url):
         try:
 
             metric = CommitMetric(app)
+             
+            if not repo_url:
+                if build.spec.source.git:
+                    repo_url = build.spec.source.git.uri
+                else:
+                    repo_url = self._get_repo_from_build_config(build)
+                    if not repo_url:
+                        logging.debug("+++++++++++++++++++++++Repo URL not found for %s/%s, trying Tekton Pipelines." % (namespace,app))
+                        tekton_build_info = self._get_repo_from_tekton(build,app)
 
-            if build.spec.source.git:
-                repo_url = build.spec.source.git.uri
-            else:
-                repo_url = self._get_repo_from_build_config(build)
 
             metric.repo_url = repo_url
             commit_sha = build.spec.revision.git.commit
@@ -194,6 +218,32 @@ class AbstractCommitCollector(pelorus.AbstractPelorusExporter):
 
         return None
 
+    def _get_repo_from_tekton(self, build, app):
+        """
+        Determines the repository url from the parent BuildConfig that created the Build resource in case
+        the BuildConfig has the git uri but the Build does not
+        :param build: the Build resource
+        :return: repo_url as a str or None if not found
+        """
+        #v1_tekton_runs = self._kube_client.resources.get(api_version='tekton.dev/v1alpha1', kind='PipelineRun')
+        v1_tekton_resources = self._kube_client.resources.get(api_version='tekton.dev/v1alpha1', kind='PipelineResource')
+        # only use builds that have the app label
+        app_label = pelorus.get_app_label()
+        tekton_app_resources = v1_tekton_resources.get(namespace=build.status.config.namespace, label_selector=app_label)
+        tekton_app_resources = list(filter(lambda b: b.metadata.labels[app_label] == app, tekton_app_resources.items))
+        if tekton_app_resources:
+            for tek_resource in tekton_app_resources:
+                if tek_resource.spec.type == 'git':
+                    logging.debug("============ RESOUCE: %s" % (tek_resource))
+                    return tekton_app_resources
+                
+
+
+        #tekton_git_resources = list(filter(lambda b: b.spec.type == 'git', tekton_resources))
+
+
+
+        return None
 
 class CommitMetric:
 
