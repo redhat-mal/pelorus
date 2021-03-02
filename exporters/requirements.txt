@@ -1,7 +1,6 @@
 requests
 prometheus_client
-kubernetes < 12
-openshift
+openshift < 0.12
 jsonpath_ng
 jira
 pytz
