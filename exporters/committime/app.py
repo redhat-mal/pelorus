@@ -32,7 +32,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     pelorus.load_kube_config()
-    k8s_config = client.Configuration()
+    k8s_config = client.Configuration().get_default_copy()
+    k8s_config.verify_ssl = False
+    #k8s_config = client.Configuration()
     k8s_client = client.api_client.ApiClient(configuration=k8s_config)
     dyn_client = DynamicClient(k8s_client)
 
